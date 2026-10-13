@@ -1,10 +1,12 @@
 import base64
+import json
 import time
 import uuid
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, Header, HTTPException, Query, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from starlette.responses import StreamingResponse
 
 app = FastAPI(title="Orders Engineering API")
 
@@ -40,50 +42,69 @@ class OrderCreateRequest(BaseModel):
 def ping():
     return {"email": "23f2003924@ds.study.iitm.ac.in"}
 
-# Middleware for Per-Client Rate Limiting using X-Client-Id header
+# Middleware for Per-Client Rate Limiting and global X-Request-ID echoing
 @app.middleware("http")
-async def rate_limit_middleware(request, call_next):
-    # Allow health check /ping to bypass rate limiting
-    if request.url.path == "/ping":
-        return await call_next(request)
+async def api_middleware(request, call_next):
+    x_request_id = request.headers.get("X-Request-ID")
 
-    client_id = request.headers.get("X-Client-Id", "anonymous")
-    now = time.time()
+    # Rate limiting logic
+    if request.url.path != "/ping":
+        client_id = request.headers.get("X-Client-Id", "anonymous")
+        now = time.time()
 
-    if client_id not in rate_limit_store:
-        rate_limit_store[client_id] = []
+        if client_id not in rate_limit_store:
+            rate_limit_store[client_id] = []
 
-    # Clean up timestamps outside the 10-second window
-    timestamps = [t for t in rate_limit_store[client_id] if now - t < RATE_LIMIT_WINDOW]
+        timestamps = [t for t in rate_limit_store[client_id] if now - t < RATE_LIMIT_WINDOW]
 
-    if len(timestamps) >= RATE_LIMIT_MAX:
+        if len(timestamps) >= RATE_LIMIT_MAX:
+            rate_limit_store[client_id] = timestamps
+            error_content = {"detail": "Rate limit exceeded."}
+            if x_request_id:
+                error_content["request_id"] = x_request_id
+            return Response(
+                content=json.dumps(error_content),
+                status_code=429,
+                media_type="application/json",
+                headers={"Retry-After": "10"}
+            )
+
+        timestamps.append(now)
         rate_limit_store[client_id] = timestamps
-        return Response(
-            content='{"detail": "Rate limit exceeded."}',
-            status_code=429,
-            media_type="application/json",
-            headers={"Retry-After": "10"}
-        )
-
-    timestamps.append(now)
-    rate_limit_store[client_id] = timestamps
 
     response = await call_next(request)
+
+    # Automatically inject request_id into any JSON response body if X-Request-ID was provided
+    if x_request_id and response.headers.get("content-type") == "application/json":
+        body = [chunk async for chunk in response.body_iterator]
+        response.body_iterator = iter(body)  # Reset body iterator
+        try:
+            body_content = b"".join(body).decode("utf-8")
+            data = json.loads(body_content)
+            if isinstance(data, dict):
+                data["request_id"] = x_request_id
+                new_body = json.dumps(data).encode("utf-8")
+                response = Response(
+                    content=new_body,
+                    status_code=response.status_code,
+                    headers=dict(response.headers),
+                    media_type="application/json"
+                )
+                response.headers["content-length"] = str(len(new_body))
+        except Exception:
+            pass
+
     return response
 
 # 1. Idempotent Order Creation
 @app.post("/orders", status_code=status.HTTP_201_CREATED)
 def create_order(
     order_req: OrderCreateRequest,
-    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
-    x_request_id: Optional[str] = Header(None, alias="X-Request-ID")
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key")
 ):
     if idempotency_key:
         if idempotency_key in idempotency_store:
-            stored_order = idempotency_store[idempotency_key].copy()
-            if x_request_id:
-                stored_order["request_id"] = x_request_id
-            return stored_order
+            return idempotency_store[idempotency_key]
 
     order_id = str(uuid.uuid4())
     new_order = {
@@ -92,9 +113,6 @@ def create_order(
         "notes": order_req.notes,
         "status": "confirmed"
     }
-
-    if x_request_id:
-        new_order["request_id"] = x_request_id
 
     if idempotency_key:
         idempotency_store[idempotency_key] = new_order
@@ -105,8 +123,7 @@ def create_order(
 @app.get("/orders")
 def get_orders(
     limit: int = Query(10, ge=1, le=100),
-    cursor: Optional[str] = None,
-    x_request_id: Optional[str] = Header(None, alias="X-Request-ID")
+    cursor: Optional[str] = None
 ):
     start_index = 0
     if cursor:
@@ -120,10 +137,7 @@ def get_orders(
             )
 
     if start_index >= TOTAL_ORDERS:
-        result = {"items": [], "next_cursor": None}
-        if x_request_id:
-            result["request_id"] = x_request_id
-        return result
+        return {"items": [], "next_cursor": None}
 
     end_index = min(start_index + limit, TOTAL_ORDERS)
     items = ORDERS_CATALOG[start_index:end_index]
@@ -133,11 +147,7 @@ def get_orders(
         cursor_str = str(end_index)
         next_cursor = base64.b64encode(cursor_str.encode("utf-8")).decode("utf-8")
 
-    result = {
+    return {
         "items": items,
         "next_cursor": next_cursor
     }
-    if x_request_id:
-        result["request_id"] = x_request_id
-
-    return result
