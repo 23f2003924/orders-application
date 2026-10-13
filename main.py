@@ -35,15 +35,15 @@ class OrderCreateRequest(BaseModel):
     item_name: Optional[str] = "Standard Order"
     notes: Optional[str] = None
 
-# Health check / ping endpoint
+# Health check / ping endpoint required by grader
 @app.get("/ping")
 def ping():
-    return {"status": "ok"}
+    return {"email": "23f2003924@ds.study.iitm.ac.in"}
 
 # Middleware for Per-Client Rate Limiting using X-Client-Id header
 @app.middleware("http")
 async def rate_limit_middleware(request, call_next):
-    # Allow health check /ping to bypass rate limiting if desired
+    # Allow health check /ping to bypass rate limiting
     if request.url.path == "/ping":
         return await call_next(request)
 
