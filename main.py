@@ -75,11 +75,15 @@ async def rate_limit_middleware(request, call_next):
 @app.post("/orders", status_code=status.HTTP_201_CREATED)
 def create_order(
     order_req: OrderCreateRequest,
-    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key")
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
+    x_request_id: Optional[str] = Header(None, alias="X-Request-ID")
 ):
     if idempotency_key:
         if idempotency_key in idempotency_store:
-            return idempotency_store[idempotency_key]
+            stored_order = idempotency_store[idempotency_key].copy()
+            if x_request_id:
+                stored_order["request_id"] = x_request_id
+            return stored_order
 
     order_id = str(uuid.uuid4())
     new_order = {
@@ -88,6 +92,9 @@ def create_order(
         "notes": order_req.notes,
         "status": "confirmed"
     }
+
+    if x_request_id:
+        new_order["request_id"] = x_request_id
 
     if idempotency_key:
         idempotency_store[idempotency_key] = new_order
@@ -98,7 +105,8 @@ def create_order(
 @app.get("/orders")
 def get_orders(
     limit: int = Query(10, ge=1, le=100),
-    cursor: Optional[str] = None
+    cursor: Optional[str] = None,
+    x_request_id: Optional[str] = Header(None, alias="X-Request-ID")
 ):
     start_index = 0
     if cursor:
@@ -112,7 +120,10 @@ def get_orders(
             )
 
     if start_index >= TOTAL_ORDERS:
-        return {"items": [], "next_cursor": None}
+        result = {"items": [], "next_cursor": None}
+        if x_request_id:
+            result["request_id"] = x_request_id
+        return result
 
     end_index = min(start_index + limit, TOTAL_ORDERS)
     items = ORDERS_CATALOG[start_index:end_index]
@@ -122,7 +133,11 @@ def get_orders(
         cursor_str = str(end_index)
         next_cursor = base64.b64encode(cursor_str.encode("utf-8")).decode("utf-8")
 
-    return {
+    result = {
         "items": items,
         "next_cursor": next_cursor
     }
+    if x_request_id:
+        result["request_id"] = x_request_id
+
+    return result
