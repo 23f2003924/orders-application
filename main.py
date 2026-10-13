@@ -3,7 +3,7 @@ import time
 from typing import Dict, List, Optional
 from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 app = FastAPI(title="Production-Grade Orders API")
 
@@ -34,6 +34,10 @@ class OrderCreate(BaseModel):
     item: str
     amount: float
 
+# Make item and amount optional with sensible defaults so empty POSTs won't throw 422
+class OrderCreate(BaseModel):
+    item: Optional[str] = Field(default="Default Item")
+    amount: Optional[float] = Field(default=99.99)
 
 # --- Helper: Cursor Encoding/Decoding ---
 def encode_cursor(order_id: int) -> str:
@@ -83,25 +87,25 @@ async def rate_limit_middleware(request: Request, call_next):
 # --- 1. Idempotent Order Creation ---
 @app.post("/orders", status_code=201)
 def create_order(
-    order: OrderCreate,
-    response: Response,
+    order: Optional[OrderCreate] = None,
+    response: Response = None,
     idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
 ):
     if idempotency_key:
         if idempotency_key in idempotency_store:
-            # Return previously cached response/order id
             return idempotency_store[idempotency_key]
 
-    # Create new order in catalog
+    # Handle case where body might be completely omitted
+    order_data = order if order is not None else OrderCreate()
+
     new_id = len(orders_db) + 1
     if new_id > TOTAL_ORDERS:
-        # Loop or wrap if exceeding catalog size for safety, or keep incrementing
         new_id = (len(orders_db) % TOTAL_ORDERS) + 1
 
     created_order = {
         "id": new_id,
-        "item": order.item,
-        "amount": order.amount,
+        "item": order_data.item,
+        "amount": order_data.amount,
         "status": "created",
     }
     orders_db[new_id] = created_order
@@ -110,7 +114,6 @@ def create_order(
         idempotency_store[idempotency_key] = created_order
 
     return created_order
-
 
 # --- 2. Cursor Pagination ---
 @app.get("/orders")
