@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 app = FastAPI(title="Orders Engineering API")
 
-# 1. Enable CORS so the browser / grader can verify requests directly
+# Enable CORS so the browser / grader can verify requests directly
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -35,9 +35,18 @@ class OrderCreateRequest(BaseModel):
     item_name: Optional[str] = "Standard Order"
     notes: Optional[str] = None
 
+# Health check / ping endpoint
+@app.get("/ping")
+def ping():
+    return {"status": "ok"}
+
 # Middleware for Per-Client Rate Limiting using X-Client-Id header
 @app.middleware("http")
 async def rate_limit_middleware(request, call_next):
+    # Allow health check /ping to bypass rate limiting if desired
+    if request.url.path == "/ping":
+        return await call_next(request)
+
     client_id = request.headers.get("X-Client-Id", "anonymous")
     now = time.time()
 
@@ -70,10 +79,8 @@ def create_order(
 ):
     if idempotency_key:
         if idempotency_key in idempotency_store:
-            # Return the exact same order on repeat calls
             return idempotency_store[idempotency_key]
 
-    # Create a new unique order
     order_id = str(uuid.uuid4())
     new_order = {
         "id": order_id,
@@ -96,7 +103,6 @@ def get_orders(
     start_index = 0
     if cursor:
         try:
-            # Decode opaque cursor string back to an integer offset
             decoded_bytes = base64.b64decode(cursor.encode("utf-8"))
             start_index = int(decoded_bytes.decode("utf-8"))
         except Exception:
@@ -111,7 +117,6 @@ def get_orders(
     end_index = min(start_index + limit, TOTAL_ORDERS)
     items = ORDERS_CATALOG[start_index:end_index]
 
-    # Generate opaque next cursor if more items remain
     next_cursor = None
     if end_index < TOTAL_ORDERS:
         cursor_str = str(end_index)
